@@ -1,0 +1,17 @@
+---
+- name: Deploy Flask application to Kubernetes
+  hosts: vm1
+  gather_facts: false
+
+  tasks:
+    - name: Apply Kubernetes ConfigMap
+      command: kubectl apply -f configmap.yaml
+
+    - name: Apply Kubernetes Deployment
+      command: kubectl apply -f deployment.yaml
+
+    - name: Apply Kubernetes Service
+      command: kubectl apply -f service.yaml
+
+    - name: Verify application pods
+      command: kubectl get pods -n default -o wide
