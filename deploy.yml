@@ -4,14 +4,23 @@
   gather_facts: false
 
   tasks:
-    - name: Apply Kubernetes ConfigMap
-      command: kubectl apply -f configmap.yaml
+    - name: Copy Kubernetes manifests to VM1
+      ansible.builtin.copy:
+        src: "{{ playbook_dir }}/{{ item }}"
+        dest: "/tmp/{{ item }}"
+      loop:
+        - configmap.yaml
+        - deployment.yaml
+        - service.yaml
 
-    - name: Apply Kubernetes Deployment
-      command: kubectl apply -f deployment.yaml
+    - name: Apply ConfigMap
+      ansible.builtin.command:
+        cmd: kubectl apply -f /tmp/configmap.yaml
 
-    - name: Apply Kubernetes Service
-      command: kubectl apply -f service.yaml
+    - name: Apply Deployment
+      ansible.builtin.command:
+        cmd: kubectl apply -f /tmp/deployment.yaml
 
-    - name: Verify application pods
-      command: kubectl get pods -n default -o wide
+    - name: Apply Service
+      ansible.builtin.command:
+        cmd: kubectl apply -f /tmp/service.yaml
