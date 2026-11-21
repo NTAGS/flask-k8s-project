@@ -1,0 +1,27 @@
+
+---
+- name: Delete Flask application from Kubernetes
+  hosts: vm1
+  gather_facts: false
+
+  tasks:
+    - name: Copy Kubernetes manifests to VM1
+      ansible.builtin.copy:
+        src: "{{ playbook_dir }}/{{ item }}"
+        dest: "/tmp/{{ item }}"
+      loop:
+        - configmap.yaml
+        - deployment.yaml
+        - service.yaml
+
+    - name: Delete Flask Service
+      ansible.builtin.command:
+        cmd: kubectl delete -f /tmp/service.yaml -n default --ignore-not-found=true
+
+    - name: Delete Flask Deployment
+      ansible.builtin.command:
+        cmd: kubectl delete -f /tmp/deployment.yaml -n default --ignore-not-found=true
+
+    - name: Delete Flask ConfigMap
+      ansible.builtin.command:
+        cmd: kubectl delete -f /tmp/configmap.yaml -n default --ignore-not-found=true
