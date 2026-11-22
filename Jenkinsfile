@@ -1,4 +1,3 @@
-
 pipeline {
     agent any
 
@@ -6,18 +5,6 @@ pipeline {
         timestamps()
         disableConcurrentBuilds()
         skipDefaultCheckout(true)
-    }
-
-    environment {
-        AWX_TOKEN_CREDENTIALS_ID = 'awx-api-token'
-        AWX_JOB_TEMPLATE_ID = '12'
-
-        K8S_NAMESPACE = 'flask-cicd'
-        K8S_DEPLOYMENT_NAME = 'flask-deployment'
-        K8S_CONTAINER_NAME = 'flask-app'
-
-        AWX_TIMEOUT_MINUTES = '15'
-        AWX_POLL_SECONDS = '10'
     }
 
     parameters {
@@ -41,8 +28,7 @@ pipeline {
     }
 
     stages {
-
-        stage('Validate Release Approval') {
+        stage('Validate Release Approval and Configuration') {
             steps {
                 script {
                     if (!params.RELEASE_APPROVED) {
@@ -63,18 +49,41 @@ pipeline {
                         error('Invalid RELEASE_REF.')
                     }
 
-                    def required = [
+                    def requiredVariables = [
                         'DOCKERHUB_IMAGE_REPO',
-                        'DOCKERHUB_CREDENTIALS_ID',
-                        'AWX_URL'
+                        'AWX_URL',
+                        'AWX_JOB_TEMPLATE_ID',
+                        'K8S_NAMESPACE',
+                        'K8S_DEPLOYMENT_NAME',
+                        'K8S_CONTAINER_NAME',
+                        'AWX_TIMEOUT_MINUTES',
+                        'AWX_POLL_SECONDS'
                     ]
 
-                    def missing = required.findAll {
-                        key -> !env[key]?.trim()
+                    def missingVariables = requiredVariables.findAll { key ->
+                        !env[key]?.trim()
                     }
 
-                    if (missing) {
-                        error("Missing Jenkins Global Environment Variables: ${missing.join(', ')}")
+                    if (missingVariables) {
+                        error("Missing Jenkins Global Environment Variables: ${missingVariables.join(', ')}")
+                    }
+
+                    if (!(env.AWX_JOB_TEMPLATE_ID ==~ /[0-9]+/)) {
+                        error('AWX_JOB_TEMPLATE_ID must be numeric.')
+                    }
+
+                    if (!(env.AWX_TIMEOUT_MINUTES ==~ /[0-9]+/) ||
+                        env.AWX_TIMEOUT_MINUTES.toInteger() <= 0) {
+                        error('AWX_TIMEOUT_MINUTES must be a positive integer.')
+                    }
+
+                    if (!(env.AWX_POLL_SECONDS ==~ /[0-9]+/) ||
+                        env.AWX_POLL_SECONDS.toInteger() <= 0) {
+                        error('AWX_POLL_SECONDS must be a positive integer.')
+                    }
+
+                    if (!(env.DOCKERHUB_IMAGE_REPO ==~ /[A-Za-z0-9._/-]+/)) {
+                        error('DOCKERHUB_IMAGE_REPO contains unsupported characters.')
                     }
 
                     env.AWX_BASE_URL = env.AWX_URL.replaceAll('/+$', '')
@@ -88,15 +97,12 @@ pipeline {
 
                 sh '''
                     set -eu
-
                     git fetch --all --tags --prune
 
                     if git rev-parse --verify "${RELEASE_REF}^{commit}" >/dev/null 2>&1; then
                         git checkout --detach "$RELEASE_REF"
-
                     elif git rev-parse --verify "origin/${RELEASE_REF}^{commit}" >/dev/null 2>&1; then
                         git checkout --detach "origin/${RELEASE_REF}"
-
                     else
                         echo "Approved Git ref not found: $RELEASE_REF"
                         exit 1
@@ -111,11 +117,11 @@ pipeline {
                         returnStdout: true
                     ).trim()
 
-                    env.FULL_IMAGE =
-                        "${env.DOCKERHUB_IMAGE_REPO}:${env.IMAGE_TAG}"
+                    env.FULL_IMAGE = "${env.DOCKERHUB_IMAGE_REPO}:${env.IMAGE_TAG}"
 
-                    echo "Release: ${params.RELEASE_REQUEST_ID}"
-                    echo "Image: ${env.FULL_IMAGE}"
+                    echo "Release request: ${params.RELEASE_REQUEST_ID}"
+                    echo "Approved Git ref: ${params.RELEASE_REF}"
+                    echo "Image to publish: ${env.FULL_IMAGE}"
                 }
             }
         }
@@ -124,11 +130,9 @@ pipeline {
             steps {
                 sh '''
                     set -eu
-
                     command -v git
                     command -v docker
                     command -v curl
-
                     docker version
                     docker info
                 '''
@@ -139,7 +143,6 @@ pipeline {
             steps {
                 sh '''
                     set -eu
-
                     docker build --pull -t "$FULL_IMAGE" .
                 '''
             }
@@ -149,7 +152,7 @@ pipeline {
             steps {
                 withCredentials([
                     usernamePassword(
-                        credentialsId: "${env.DOCKERHUB_CREDENTIALS_ID}",
+                        credentialsId: 'dockerhub-creds',
                         usernameVariable: 'DOCKER_USER',
                         passwordVariable: 'DOCKER_TOKEN'
                     )
@@ -172,11 +175,10 @@ pipeline {
             steps {
                 withCredentials([
                     string(
-                        credentialsId: "${env.AWX_TOKEN_CREDENTIALS_ID}",
+                        credentialsId: 'awx-api-token',
                         variable: 'AWX_TOKEN'
                     )
                 ]) {
-
                     script {
                         def launchPayload = [
                             extra_vars: [
@@ -210,59 +212,56 @@ pipeline {
                     '''
 
                     script {
-                        def launchResponse =
-                            new groovy.json.JsonSlurperClassic()
-                                .parseText(readFile('awx-launch-response.json'))
+                        def launchResponse = new groovy.json.JsonSlurperClassic()
+                            .parseText(readFile('awx-launch-response.json'))
 
                         if (!launchResponse.id) {
                             error('AWX response did not contain a job ID.')
                         }
 
                         env.AWX_JOB_ID = launchResponse.id.toString()
-
-                        echo "AWX Job Started: ${env.AWX_JOB_ID}"
+                        echo "AWX Job started: ${env.AWX_JOB_ID}"
                     }
 
-                    timeout(
-                        time: env.AWX_TIMEOUT_MINUTES.toInteger(),
-                        unit: 'MINUTES'
-                    ) {
+                    // Declarative Pipeline requires Groovy control logic inside script {}.
+                    script {
+                        timeout(
+                            time: env.AWX_TIMEOUT_MINUTES.toInteger(),
+                            unit: 'MINUTES'
+                        ) {
+                            waitUntil {
+                                sh '''
+                                    set -eu
+                                    set +x
 
-                        waitUntil {
+                                    curl --fail --silent --show-error \
+                                        "$AWX_BASE_URL/api/v2/jobs/$AWX_JOB_ID/" \
+                                        --header "Authorization: Bearer $AWX_TOKEN" \
+                                        --header "Content-Type: application/json" \
+                                        --output awx-job-status.json
+                                '''
 
-                            sh '''
-                                set -eu
-                                set +x
-
-                                curl --fail --silent --show-error \
-                                    "$AWX_BASE_URL/api/v2/jobs/$AWX_JOB_ID/" \
-                                    --header "Authorization: Bearer $AWX_TOKEN" \
-                                    --header "Content-Type: application/json" \
-                                    --output awx-job-status.json
-                            '''
-
-                            def jobStatus =
-                                new groovy.json.JsonSlurperClassic()
+                                def jobStatus = new groovy.json.JsonSlurperClassic()
                                     .parseText(readFile('awx-job-status.json'))
 
-                            def status = jobStatus.status?.toString()
+                                def status = jobStatus.status?.toString()
+                                echo "AWX Job status: ${status}"
 
-                            echo "AWX Job Status: ${status}"
+                                if (status == 'successful') {
+                                    return true
+                                }
 
-                            if (status == 'successful') {
-                                return true
+                                if (status in ['failed', 'error', 'canceled']) {
+                                    error("AWX deployment failed with status: ${status}")
+                                }
+
+                                sleep(
+                                    time: env.AWX_POLL_SECONDS.toInteger(),
+                                    unit: 'SECONDS'
+                                )
+
+                                return false
                             }
-
-                            if (status in ['failed', 'error', 'canceled']) {
-                                error("AWX deployment failed: ${status}")
-                            }
-
-                            sleep(
-                                time: env.AWX_POLL_SECONDS.toInteger(),
-                                unit: 'SECONDS'
-                            )
-
-                            return false
                         }
                     }
                 }
@@ -276,7 +275,7 @@ pipeline {
         }
 
         failure {
-            echo 'Pipeline failed. Check Jenkins Console Output and AWX job.'
+            echo 'Pipeline failed. Check Jenkins Console Output and the AWX job.'
         }
 
         always {
