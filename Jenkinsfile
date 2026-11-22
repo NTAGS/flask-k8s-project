@@ -8,58 +8,24 @@ pipeline {
         skipDefaultCheckout(true)
     }
 
-    parameters {
-        booleanParam(
-            name: 'RELEASE_APPROVED',
-            defaultValue: false,
-            description: 'Set true only after release approval.'
-        )
-
-        string(
-            name: 'RELEASE_REF',
-            defaultValue: '',
-            description: 'Approved Git branch, tag, or commit SHA.'
-        )
-
-        string(
-            name: 'RELEASE_REQUEST_ID',
-            defaultValue: '',
-            description: 'Approved release/change request ID.'
-        )
-    }
-
     stages {
-        stage('Validate Release Approval and Configuration') {
+        stage('Validate Configuration') {
             steps {
                 script {
-                    if (!params.RELEASE_APPROVED) {
-                        error('Deployment blocked: release not approved.')
+                    def requiredVariables = [
+                        'DOCKERHUB_IMAGE_REPO',
+                        'AWX_URL',
+                        'AWX_JOB_TEMPLATE_ID',
+                        'K8S_NAMESPACE',
+                        'K8S_DEPLOYMENT_NAME',
+                        'K8S_CONTAINER_NAME',
+                        'AWX_TIMEOUT_MINUTES',
+                        'AWX_POLL_SECONDS'
+                    ]
+
+                    def missingVariables = requiredVariables.findAll {
+                        !env."${it}"?.trim()
                     }
-
-                    if (!params.RELEASE_REF?.trim()) {
-                        error('RELEASE_REF is required.')
-                    }
-
-                    if (!params.RELEASE_REQUEST_ID?.trim()) {
-                        error('RELEASE_REQUEST_ID is required.')
-                    }
-
-                    if (!params.RELEASE_REF.matches('[A-Za-z0-9._/-]+') ||
-                        params.RELEASE_REF.contains('..') ||
-                        params.RELEASE_REF.startsWith('-')) {
-                        error('Invalid RELEASE_REF.')
-                    }
-
-                    def missingVariables = []
-
-                    if (!env.DOCKERHUB_IMAGE_REPO?.trim()) missingVariables.add('DOCKERHUB_IMAGE_REPO')
-                    if (!env.AWX_URL?.trim()) missingVariables.add('AWX_URL')
-                    if (!env.AWX_JOB_TEMPLATE_ID?.trim()) missingVariables.add('AWX_JOB_TEMPLATE_ID')
-                    if (!env.K8S_NAMESPACE?.trim()) missingVariables.add('K8S_NAMESPACE')
-                    if (!env.K8S_DEPLOYMENT_NAME?.trim()) missingVariables.add('K8S_DEPLOYMENT_NAME')
-                    if (!env.K8S_CONTAINER_NAME?.trim()) missingVariables.add('K8S_CONTAINER_NAME')
-                    if (!env.AWX_TIMEOUT_MINUTES?.trim()) missingVariables.add('AWX_TIMEOUT_MINUTES')
-                    if (!env.AWX_POLL_SECONDS?.trim()) missingVariables.add('AWX_POLL_SECONDS')
 
                     if (missingVariables) {
                         error("Missing Jenkins Global Environment Variables: ${missingVariables.join(', ')}")
@@ -79,8 +45,8 @@ pipeline {
                         error('AWX_POLL_SECONDS must be a positive integer.')
                     }
 
-                    if (!(env.DOCKERHUB_IMAGE_REPO ==~ /[A-Za-z0-9._\/-]+/)) {
-                        error('DOCKERHUB_IMAGE_REPO contains unsupported characters.')
+                    if (!(env.DOCKERHUB_IMAGE_REPO ==~ /[A-Za-z0-9._/-]+/)) {
+                        error('Invalid Docker Hub image repository.')
                     }
 
                     env.AWX_BASE_URL = env.AWX_URL.replaceAll('/+$', '')
@@ -88,26 +54,26 @@ pipeline {
             }
         }
 
-        stage('Checkout Approved Source') {
+        stage('Checkout Release Branch') {
             steps {
                 checkout scm
 
                 sh '''
                     set -eu
-                    git fetch origin --tags --prune
 
-                    if git show-ref --verify --quiet "refs/remotes/origin/${RELEASE_REF}"; then
-                        git checkout --detach "refs/remotes/origin/${RELEASE_REF}"
-                    elif git rev-parse --verify "refs/tags/${RELEASE_REF}^{commit}" >/dev/null 2>&1; then
-                        git checkout --detach "refs/tags/${RELEASE_REF}"
-                    elif git rev-parse --verify "${RELEASE_REF}^{commit}" >/dev/null 2>&1; then
-                        git checkout --detach "$RELEASE_REF"
-                    else
-                        echo "Approved Git ref not found: $RELEASE_REF"
+                    echo "Checking out the release branch deployment source..."
+
+                    git fetch origin release
+
+                    SOURCE_BRANCH=$(git branch -r --contains HEAD | grep -E '^[[:space:]]*origin/release$' || true)
+
+                    if [ -z "$SOURCE_BRANCH" ]; then
+                        echo "ERROR: Checked-out commit does not belong to origin/release."
                         exit 1
                     fi
 
                     git status --short
+                    git log -1 --oneline
                 '''
 
                 script {
@@ -123,10 +89,12 @@ pipeline {
 
                     env.FULL_IMAGE = "${env.DOCKERHUB_IMAGE_REPO}:${env.IMAGE_TAG}"
 
-                    echo "Release request: ${params.RELEASE_REQUEST_ID}"
-                    echo "Approved Git ref: ${params.RELEASE_REF}"
-                    echo "Approved commit: ${env.SOURCE_COMMIT}"
-                    echo "Image to build on VM1: ${env.FULL_IMAGE}"
+                    env.RELEASE_REQUEST_ID = "JENKINS-${env.BUILD_NUMBER}"
+
+                    echo "Release branch: release"
+                    echo "Source commit: ${env.SOURCE_COMMIT}"
+                    echo "Release ID: ${env.RELEASE_REQUEST_ID}"
+                    echo "Image: ${env.FULL_IMAGE}"
                 }
             }
         }
@@ -135,8 +103,11 @@ pipeline {
             steps {
                 sh '''
                     set -eu
+
                     command -v git
                     command -v curl
+                    command -v python3
+
                     echo "Jenkins agent validation successful."
                     echo "Docker is not required on Jenkins."
                 '''
@@ -160,8 +131,8 @@ pipeline {
                                 namespace: env.K8S_NAMESPACE,
                                 deployment_name: env.K8S_DEPLOYMENT_NAME,
                                 container_name: env.K8S_CONTAINER_NAME,
-                                release_ref: params.RELEASE_REF,
-                                release_request_id: params.RELEASE_REQUEST_ID
+                                release_ref: 'release',
+                                release_request_id: env.RELEASE_REQUEST_ID
                             ]
                         ]
 
@@ -185,65 +156,84 @@ pipeline {
                     '''
 
                     script {
-                        def launchResponse = new groovy.json.JsonSlurperClassic()
-                            .parseText(readFile('awx-launch-response.json'))
+                        env.AWX_JOB_ID = sh(
+                            script: '''
+                                python3 -c "import json; print(json.load(open('awx-launch-response.json'))['id'])"
+                            ''',
+                            returnStdout: true
+                        ).trim()
 
-                        if (!launchResponse.id) {
-                            error('AWX response did not contain a job ID.')
+                        if (!(env.AWX_JOB_ID ==~ /[0-9]+/)) {
+                            error('AWX response did not contain a valid job ID.')
                         }
 
-                        env.AWX_JOB_ID = launchResponse.id.toString()
                         echo "AWX Job started: ${env.AWX_JOB_ID}"
                     }
 
-                    script {
-                        timeout(
-                            time: env.AWX_TIMEOUT_MINUTES.toInteger(),
-                            unit: 'MINUTES'
-                        ) {
-                            waitUntil {
-                                sh '''
-                                    set -eu
-                                    set +x
+                    timeout(
+                        time: env.AWX_TIMEOUT_MINUTES.toInteger(),
+                        unit: 'MINUTES'
+                    ) {
+                        waitUntil {
+                            sh '''
+                                set -eu
+                                set +x
 
-                                    curl --fail --silent --show-error \
-                                        "$AWX_BASE_URL/api/v2/jobs/$AWX_JOB_ID/" \
-                                        --header "Authorization: Bearer $AWX_TOKEN" \
-                                        --header "Content-Type: application/json" \
-                                        --output awx-job-status.json
-                                '''
+                                curl --fail --silent --show-error \
+                                    "$AWX_BASE_URL/api/v2/jobs/$AWX_JOB_ID/" \
+                                    --header "Authorization: Bearer $AWX_TOKEN" \
+                                    --header "Content-Type: application/json" \
+                                    --output awx-job-status.json
+                            '''
 
-                                def jobStatus = new groovy.json.JsonSlurperClassic()
-                                    .parseText(readFile('awx-job-status.json'))
+                            env.AWX_JOB_STATUS = sh(
+                                script: '''
+                                    python3 -c "import json; print(json.load(open('awx-job-status.json'))['status'])"
+                                ''',
+                                returnStdout: true
+                            ).trim()
 
-                                def status = jobStatus.status?.toString()
-                                echo "AWX Job status: ${status}"
+                            echo "AWX Job status: ${env.AWX_JOB_STATUS}"
 
-                                if (status == 'successful') {
-                                    return true
-                                }
-
-                                if (status in ['failed', 'error', 'canceled']) {
-                                    error("AWX deployment failed with status: ${status}")
-                                }
-
-                                sleep(
-                                    time: env.AWX_POLL_SECONDS.toInteger(),
-                                    unit: 'SECONDS'
-                                )
-
-                                return false
+                            if (env.AWX_JOB_STATUS == 'successful') {
+                                return true
                             }
+
+                            if (env.AWX_JOB_STATUS in ['failed', 'error', 'canceled']) {
+                                error("AWX deployment failed: ${env.AWX_JOB_STATUS}")
+                            }
+
+                            sleep(
+                                time: env.AWX_POLL_SECONDS.toInteger(),
+                                unit: 'SECONDS'
+                            )
+
+                            return false
                         }
                     }
                 }
+            }
+        }
+
+        stage('Release Deployment Summary') {
+            steps {
+                echo """
+                RELEASE DEPLOYMENT SUCCESSFUL
+
+                Branch: release
+                Commit: ${env.SOURCE_COMMIT}
+                Release ID: ${env.RELEASE_REQUEST_ID}
+                Docker Image: ${env.FULL_IMAGE}
+                AWX Job: ${env.AWX_JOB_ID}
+                Kubernetes Namespace: ${env.K8S_NAMESPACE}
+                """
             }
         }
     }
 
     post {
         success {
-            echo 'Approved release successfully built, pushed and deployed through AWX.'
+            echo 'Release successfully built, pushed and deployed through AWX.'
         }
 
         failure {
@@ -255,4 +245,3 @@ pipeline {
         }
     }
 }
-
