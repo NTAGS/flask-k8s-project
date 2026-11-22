@@ -144,3 +144,12 @@
           - "Source commit: {{ source_commit }}"
           - "Namespace: {{ namespace }}"
           - "Release request: {{ release_request_id | default('not supplied') }}"
+    - name: Remove temporary Docker authentication
+      ansible.builtin.file:
+        path: "{{ docker_auth_dir }}"
+        state: absent
+
+    - name: Remove temporary application source
+      ansible.builtin.file:
+        path: "{{ app_source_dir }}"
+        state: absent
