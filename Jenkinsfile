@@ -60,9 +60,16 @@ pipeline {
                         'AWX_POLL_SECONDS'
                     ]
 
-                    def missingVariables = requiredVariables.findAll { key ->
-                        !env[key]?.trim()
-                    }
+                    def missingVariables = []
+
+                    if (!env.DOCKERHUB_IMAGE_REPO?.trim()) missingVariables.add('DOCKERHUB_IMAGE_REPO')
+                    if (!env.AWX_URL?.trim()) missingVariables.add('AWX_URL')
+                    if (!env.AWX_JOB_TEMPLATE_ID?.trim()) missingVariables.add('AWX_JOB_TEMPLATE_ID')
+                    if (!env.K8S_NAMESPACE?.trim()) missingVariables.add('K8S_NAMESPACE')
+                    if (!env.K8S_DEPLOYMENT_NAME?.trim()) missingVariables.add('K8S_DEPLOYMENT_NAME')
+                    if (!env.K8S_CONTAINER_NAME?.trim()) missingVariables.add('K8S_CONTAINER_NAME')
+                    if (!env.AWX_TIMEOUT_MINUTES?.trim()) missingVariables.add('AWX_TIMEOUT_MINUTES')
+                    if (!env.AWX_POLL_SECONDS?.trim()) missingVariables.add('AWX_POLL_SECONDS')
 
                     if (missingVariables) {
                         error("Missing Jenkins Global Environment Variables: ${missingVariables.join(', ')}")
