@@ -1,3 +1,4 @@
+
 pipeline {
     agent any
 
@@ -49,17 +50,6 @@ pipeline {
                         error('Invalid RELEASE_REF.')
                     }
 
-                    def requiredVariables = [
-                        'DOCKERHUB_IMAGE_REPO',
-                        'AWX_URL',
-                        'AWX_JOB_TEMPLATE_ID',
-                        'K8S_NAMESPACE',
-                        'K8S_DEPLOYMENT_NAME',
-                        'K8S_CONTAINER_NAME',
-                        'AWX_TIMEOUT_MINUTES',
-                        'AWX_POLL_SECONDS'
-                    ]
-
                     def missingVariables = []
 
                     if (!env.DOCKERHUB_IMAGE_REPO?.trim()) missingVariables.add('DOCKERHUB_IMAGE_REPO')
@@ -104,21 +94,28 @@ pipeline {
 
                 sh '''
                     set -eu
-                    git fetch --all --tags --prune
+                    git fetch origin --tags --prune
 
-                    if git rev-parse --verify "${RELEASE_REF}^{commit}" >/dev/null 2>&1; then
+                    if git show-ref --verify --quiet "refs/remotes/origin/${RELEASE_REF}"; then
+                        git checkout --detach "refs/remotes/origin/${RELEASE_REF}"
+                    elif git rev-parse --verify "refs/tags/${RELEASE_REF}^{commit}" >/dev/null 2>&1; then
+                        git checkout --detach "refs/tags/${RELEASE_REF}"
+                    elif git rev-parse --verify "${RELEASE_REF}^{commit}" >/dev/null 2>&1; then
                         git checkout --detach "$RELEASE_REF"
-                    elif git rev-parse --verify "origin/${RELEASE_REF}^{commit}" >/dev/null 2>&1; then
-                        git checkout --detach "origin/${RELEASE_REF}"
                     else
                         echo "Approved Git ref not found: $RELEASE_REF"
                         exit 1
                     fi
 
-                    git rev-parse --verify HEAD
+                    git status --short
                 '''
 
                 script {
+                    env.SOURCE_COMMIT = sh(
+                        script: 'git rev-parse HEAD',
+                        returnStdout: true
+                    ).trim()
+
                     env.IMAGE_TAG = sh(
                         script: 'git rev-parse --short=12 HEAD',
                         returnStdout: true
@@ -128,53 +125,21 @@ pipeline {
 
                     echo "Release request: ${params.RELEASE_REQUEST_ID}"
                     echo "Approved Git ref: ${params.RELEASE_REF}"
-                    echo "Image to publish: ${env.FULL_IMAGE}"
+                    echo "Approved commit: ${env.SOURCE_COMMIT}"
+                    echo "Image to build on VM1: ${env.FULL_IMAGE}"
                 }
             }
         }
 
-        stage('Validate Build Agent') {
+        stage('Validate Jenkins Agent') {
             steps {
                 sh '''
                     set -eu
                     command -v git
-                    command -v docker
                     command -v curl
-                    docker version
-                    docker info
+                    echo "Jenkins agent validation successful."
+                    echo "Docker is not required on Jenkins."
                 '''
-            }
-        }
-
-        stage('Build Docker Image') {
-            steps {
-                sh '''
-                    set -eu
-                    docker build --pull -t "$FULL_IMAGE" .
-                '''
-            }
-        }
-
-        stage('Push Docker Image') {
-            steps {
-                withCredentials([
-                    usernamePassword(
-                        credentialsId: 'dockerhub-creds',
-                        usernameVariable: 'DOCKER_USER',
-                        passwordVariable: 'DOCKER_TOKEN'
-                    )
-                ]) {
-                    sh '''
-                        set -eu
-                        set +x
-
-                        echo "$DOCKER_TOKEN" | docker login \
-                            --username "$DOCKER_USER" \
-                            --password-stdin
-
-                        docker push "$FULL_IMAGE"
-                    '''
-                }
             }
         }
 
@@ -191,6 +156,7 @@ pipeline {
                             extra_vars: [
                                 image_repo: env.DOCKERHUB_IMAGE_REPO,
                                 image_tag: env.IMAGE_TAG,
+                                source_commit: env.SOURCE_COMMIT,
                                 namespace: env.K8S_NAMESPACE,
                                 deployment_name: env.K8S_DEPLOYMENT_NAME,
                                 container_name: env.K8S_CONTAINER_NAME,
@@ -230,7 +196,6 @@ pipeline {
                         echo "AWX Job started: ${env.AWX_JOB_ID}"
                     }
 
-                    // Declarative Pipeline requires Groovy control logic inside script {}.
                     script {
                         timeout(
                             time: env.AWX_TIMEOUT_MINUTES.toInteger(),
@@ -278,7 +243,7 @@ pipeline {
 
     post {
         success {
-            echo 'Release built, pushed and deployed successfully through AWX.'
+            echo 'Approved release successfully built, pushed and deployed through AWX.'
         }
 
         failure {
@@ -286,8 +251,8 @@ pipeline {
         }
 
         always {
-            sh 'docker logout >/dev/null 2>&1 || true'
             cleanWs()
         }
     }
 }
+
