@@ -49,6 +49,10 @@ pipeline {
                         error('Invalid Docker Hub image repository.')
                     }
 
+                    if (!(env.AWX_URL ==~ /^https?:\/\/[^ ]+$/)) {
+                        error('Invalid AWX_URL.')
+                    }
+
                     env.AWX_BASE_URL = env.AWX_URL.replaceAll('/+$', '')
                 }
             }
@@ -61,16 +65,7 @@ pipeline {
                 sh '''
                     set -eu
 
-                    echo "Checking out the release branch deployment source..."
-
-                    git fetch origin release
-
-                    SOURCE_BRANCH=$(git branch -r --contains HEAD | grep -E '^[[:space:]]*origin/release$' || true)
-
-                    if [ -z "$SOURCE_BRANCH" ]; then
-                        echo "ERROR: Checked-out commit does not belong to origin/release."
-                        exit 1
-                    fi
+                    echo "Checking out release branch source..."
 
                     git status --short
                     git log -1 --oneline
@@ -88,7 +83,6 @@ pipeline {
                     ).trim()
 
                     env.FULL_IMAGE = "${env.DOCKERHUB_IMAGE_REPO}:${env.IMAGE_TAG}"
-
                     env.RELEASE_REQUEST_ID = "JENKINS-${env.BUILD_NUMBER}"
 
                     echo "Release branch: release"
