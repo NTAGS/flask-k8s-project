@@ -1,46 +1,121 @@
+
 ---
-- name: Deploy approved Flask application image to Kubernetes
+- name: Build and deploy approved Flask application
   hosts: vm1
   gather_facts: false
 
   vars:
-    manifest_files:
-      - configmap.yaml
-      - deployment.yaml
-      - service.yaml
-    remote_manifest_dir: /tmp/flask-app-cicd
+    source_repo: "https://github.com/NTAGS/flask-k8s-project.git"
+    app_source_dir: "/tmp/flask-app-cicd"
+    docker_auth_dir: "/run/flask-buildkit-auth"
+    buildkit_socket: "unix:///run/buildkit/buildkitd.sock"
 
   tasks:
-    - name: Validate deployment variables supplied by Jenkins through AWX
+    - name: Validate Jenkins deployment variables
       ansible.builtin.assert:
         that:
           - image_repo is defined
-          - image_repo | string | length > 0
           - image_tag is defined
-          - image_tag | string | length > 0
+          - source_commit is defined
           - namespace is defined
-          - namespace | string | length > 0
           - deployment_name is defined
-          - deployment_name | string | length > 0
           - container_name is defined
-          - container_name | string | length > 0
-        fail_msg: >-
-          Required deployment variables are missing. Jenkins must pass
-          image_repo, image_tag, namespace, deployment_name, and container_name
-          to AWX as extra variables.
+          - dockerhub_username is defined
+          - dockerhub_password is defined
+          - image_repo | string | length > 0
+          - image_tag | string | length > 0
+          - source_commit | string | length == 40
+        fail_msg: "Required Jenkins or Docker Hub variables are missing."
 
-    - name: Create temporary directory for Kubernetes manifests on VM1
+    - name: Verify BuildKit service is running
+      ansible.builtin.command:
+        argv:
+          - systemctl
+          - is-active
+          - buildkit
+      changed_when: false
+
+    - name: Create application source directory
       ansible.builtin.file:
-        path: "{{ remote_manifest_dir }}"
+        path: "{{ app_source_dir }}"
         state: directory
         mode: "0755"
 
-    - name: Copy Kubernetes manifests to VM1
-      ansible.builtin.copy:
-        src: "{{ playbook_dir }}/{{ item }}"
-        dest: "{{ remote_manifest_dir }}/{{ item }}"
-        mode: "0644"
-      loop: "{{ manifest_files }}"
+    - name: Checkout exact approved Git commit on VM1
+      ansible.builtin.git:
+        repo: "{{ source_repo }}"
+        dest: "{{ app_source_dir }}"
+        version: "{{ source_commit }}"
+        force: true
+
+    - name: Verify application build files exist
+      ansible.builtin.stat:
+        path: "{{ app_source_dir }}/{{ item }}"
+      loop:
+        - Dockerfile
+        - app.py
+        - requirements.txt
+      register: build_files
+
+    - name: Validate application build files
+      ansible.builtin.assert:
+        that:
+          - item.stat.exists
+          - item.stat.isreg
+        fail_msg: "A required application build file is missing."
+      loop: "{{ build_files.results }}"
+
+    - name: Build and push Flask image using BuildKit
+      become: true
+      block:
+
+        - name: Create temporary Docker authentication directory
+          ansible.builtin.file:
+            path: "{{ docker_auth_dir }}"
+            state: directory
+            mode: "0700"
+
+        - name: Configure temporary Docker Hub authentication
+          ansible.builtin.copy:
+            dest: "{{ docker_auth_dir }}/config.json"
+            mode: "0600"
+            content: |
+              {
+                "auths": {
+                  "https://index.docker.io/v1/": {
+                    "auth": "{{ (dockerhub_username ~ ':' ~ dockerhub_password) | b64encode }}"
+                  }
+                }
+              }
+          no_log: true
+
+        - name: Build and push approved Flask image
+          ansible.builtin.command:
+            argv:
+              - /usr/local/bin/buildctl
+              - --addr
+              - "{{ buildkit_socket }}"
+              - build
+              - --progress
+              - plain
+              - --frontend
+              - dockerfile.v0
+              - --local
+              - "context={{ app_source_dir }}"
+              - --local
+              - "dockerfile={{ app_source_dir }}"
+              - --opt
+              - "platform=linux/arm64"
+              - --output
+              - "type=image,name={{ image_repo }}:{{ image_tag }},push=true"
+          environment:
+            DOCKER_CONFIG: "{{ docker_auth_dir }}"
+
+      always:
+        - name: Remove temporary Docker Hub credentials
+          ansible.builtin.file:
+            path: "{{ docker_auth_dir }}"
+            state: absent
 
     - name: Apply ConfigMap
       ansible.builtin.command:
@@ -48,7 +123,7 @@
           - kubectl
           - apply
           - -f
-          - "{{ remote_manifest_dir }}/configmap.yaml"
+          - "{{ app_source_dir }}/configmap.yaml"
           - -n
           - "{{ namespace }}"
 
@@ -58,7 +133,7 @@
           - kubectl
           - apply
           - -f
-          - "{{ remote_manifest_dir }}/deployment.yaml"
+          - "{{ app_source_dir }}/deployment.yaml"
           - -n
           - "{{ namespace }}"
 
@@ -68,11 +143,11 @@
           - kubectl
           - apply
           - -f
-          - "{{ remote_manifest_dir }}/service.yaml"
+          - "{{ app_source_dir }}/service.yaml"
           - -n
           - "{{ namespace }}"
 
-    - name: Update Deployment to the image built by Jenkins
+    - name: Update Deployment to newly built image
       ansible.builtin.command:
         argv:
           - kubectl
@@ -83,7 +158,7 @@
           - -n
           - "{{ namespace }}"
 
-    - name: Wait for Kubernetes Deployment rollout
+    - name: Wait for Deployment rollout
       ansible.builtin.command:
         argv:
           - kubectl
@@ -94,16 +169,17 @@
           - "{{ namespace }}"
           - --timeout=300s
 
-    - name: Display deployed image and release information
+    - name: Display release deployment details
       ansible.builtin.debug:
         msg:
           - "Deployment: {{ deployment_name }}"
           - "Namespace: {{ namespace }}"
           - "Image: {{ image_repo }}:{{ image_tag }}"
-          - "Release ref: {{ release_ref | default('not supplied') }}"
+          - "Approved Git ref: {{ release_ref | default('not supplied') }}"
+          - "Source commit: {{ source_commit }}"
           - "Release request: {{ release_request_id | default('not supplied') }}"
 
-    - name: Remove temporary Kubernetes manifests from VM1
+    - name: Remove temporary application source
       ansible.builtin.file:
-        path: "{{ remote_manifest_dir }}"
+        path: "{{ app_source_dir }}"
         state: absent
