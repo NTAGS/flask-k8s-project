@@ -14,7 +14,7 @@ def home():
     hostname = socket.gethostname()
     return f"""
     <h1>Flask Kubernetes Project</h1>
-    <h2>Created by Naresh</h2>
+    <h2>Created by Swaroo</h2>
     <p>{GREETING_MESSAGE}</p>
     <p>This application is running inside Kubernetes.</p>
     <p><b>Pod Name:</b> {hostname}</p>
