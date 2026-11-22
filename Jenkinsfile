@@ -9,6 +9,7 @@ pipeline {
     }
 
     stages {
+
         stage('Validate Configuration') {
             steps {
                 script {
@@ -31,16 +32,16 @@ pipeline {
                         error("Missing Jenkins Global Environment Variables: ${missingVariables.join(', ')}")
                     }
 
-                    if (!(env.AWX_JOB_TEMPLATE_ID ==~ /[0-9]+/)) {
+                    if (!(env.AWX_JOB_TEMPLATE_ID ==~ '[0-9]+')) {
                         error('AWX_JOB_TEMPLATE_ID must be numeric.')
                     }
 
-                    if (!(env.AWX_TIMEOUT_MINUTES ==~ /[0-9]+/) ||
+                    if (!(env.AWX_TIMEOUT_MINUTES ==~ '[0-9]+') ||
                         env.AWX_TIMEOUT_MINUTES.toInteger() <= 0) {
                         error('AWX_TIMEOUT_MINUTES must be a positive integer.')
                     }
 
-                    if (!(env.AWX_POLL_SECONDS ==~ /[0-9]+/) ||
+                    if (!(env.AWX_POLL_SECONDS ==~ '[0-9]+') ||
                         env.AWX_POLL_SECONDS.toInteger() <= 0) {
                         error('AWX_POLL_SECONDS must be a positive integer.')
                     }
@@ -49,8 +50,9 @@ pipeline {
                         error('Invalid Docker Hub image repository.')
                     }
 
-                    if (!(env.AWX_URL ==~ /^https?:\/\/[^ ]+$/)) {
-                        error('Invalid AWX_URL.')
+                    if (!(env.AWX_URL.startsWith('http://') ||
+                          env.AWX_URL.startsWith('https://'))) {
+                        error('AWX_URL must start with http:// or https://')
                     }
 
                     env.AWX_BASE_URL = env.AWX_URL.replaceAll('/+$', '')
@@ -116,6 +118,7 @@ pipeline {
                         variable: 'AWX_TOKEN'
                     )
                 ]) {
+
                     script {
                         def launchPayload = [
                             extra_vars: [
@@ -157,7 +160,7 @@ pipeline {
                             returnStdout: true
                         ).trim()
 
-                        if (!(env.AWX_JOB_ID ==~ /[0-9]+/)) {
+                        if (!(env.AWX_JOB_ID ==~ '[0-9]+')) {
                             error('AWX response did not contain a valid job ID.')
                         }
 
@@ -193,7 +196,11 @@ pipeline {
                                 return true
                             }
 
-                            if (env.AWX_JOB_STATUS in ['failed', 'error', 'canceled']) {
+                            if (env.AWX_JOB_STATUS in [
+                                'failed',
+                                'error',
+                                'canceled'
+                            ]) {
                                 error("AWX deployment failed: ${env.AWX_JOB_STATUS}")
                             }
 
