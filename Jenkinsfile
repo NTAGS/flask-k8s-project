@@ -82,7 +82,7 @@ pipeline {
                         error('AWX_POLL_SECONDS must be a positive integer.')
                     }
 
-                    if (!(env.DOCKERHUB_IMAGE_REPO ==~ /[A-Za-z0-9._/-]+/)) {
+                    if (!(env.DOCKERHUB_IMAGE_REPO ==~ /[A-Za-z0-9._\/-]+/)) {
                         error('DOCKERHUB_IMAGE_REPO contains unsupported characters.')
                     }
 
