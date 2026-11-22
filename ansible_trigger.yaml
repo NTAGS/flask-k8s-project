@@ -1,0 +1,109 @@
+---
+- name: Deploy approved Flask application image to Kubernetes
+  hosts: vm1
+  gather_facts: false
+
+  vars:
+    manifest_files:
+      - configmap.yaml
+      - deployment.yaml
+      - service.yaml
+    remote_manifest_dir: /tmp/flask-app-cicd
+
+  tasks:
+    - name: Validate deployment variables supplied by Jenkins through AWX
+      ansible.builtin.assert:
+        that:
+          - image_repo is defined
+          - image_repo | string | length > 0
+          - image_tag is defined
+          - image_tag | string | length > 0
+          - namespace is defined
+          - namespace | string | length > 0
+          - deployment_name is defined
+          - deployment_name | string | length > 0
+          - container_name is defined
+          - container_name | string | length > 0
+        fail_msg: >-
+          Required deployment variables are missing. Jenkins must pass
+          image_repo, image_tag, namespace, deployment_name, and container_name
+          to AWX as extra variables.
+
+    - name: Create temporary directory for Kubernetes manifests on VM1
+      ansible.builtin.file:
+        path: "{{ remote_manifest_dir }}"
+        state: directory
+        mode: "0755"
+
+    - name: Copy Kubernetes manifests to VM1
+      ansible.builtin.copy:
+        src: "{{ playbook_dir }}/{{ item }}"
+        dest: "{{ remote_manifest_dir }}/{{ item }}"
+        mode: "0644"
+      loop: "{{ manifest_files }}"
+
+    - name: Apply ConfigMap
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - apply
+          - -f
+          - "{{ remote_manifest_dir }}/configmap.yaml"
+          - -n
+          - "{{ namespace }}"
+
+    - name: Apply Deployment manifest
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - apply
+          - -f
+          - "{{ remote_manifest_dir }}/deployment.yaml"
+          - -n
+          - "{{ namespace }}"
+
+    - name: Apply Service manifest
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - apply
+          - -f
+          - "{{ remote_manifest_dir }}/service.yaml"
+          - -n
+          - "{{ namespace }}"
+
+    - name: Update Deployment to the image built by Jenkins
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - set
+          - image
+          - "deployment/{{ deployment_name }}"
+          - "{{ container_name }}={{ image_repo }}:{{ image_tag }}"
+          - -n
+          - "{{ namespace }}"
+
+    - name: Wait for Kubernetes Deployment rollout
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - rollout
+          - status
+          - "deployment/{{ deployment_name }}"
+          - -n
+          - "{{ namespace }}"
+          - --timeout=300s
+
+    - name: Display deployed image and release information
+      ansible.builtin.debug:
+        msg:
+          - "Deployment: {{ deployment_name }}"
+          - "Namespace: {{ namespace }}"
+          - "Image: {{ image_repo }}:{{ image_tag }}"
+          - "Release ref: {{ release_ref | default('not supplied') }}"
+          - "Release request: {{ release_request_id | default('not supplied') }}"
+
+    - name: Remove temporary Kubernetes manifests from VM1
+      ansible.builtin.file:
+        path: "{{ remote_manifest_dir }}"
+        state: absent
